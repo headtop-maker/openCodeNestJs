@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WebRTC Mesh Conference</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; background: #111; color: #eee; min-height: 100vh; }
+    #lobby { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; gap: 1rem; }
+    #lobby input { padding: 0.75rem 1rem; font-size: 1rem; border-radius: 8px; border: 1px solid #444; background: #222; color: #eee; width: 250px; }
+    #lobby button { padding: 0.75rem 2rem; font-size: 1rem; border-radius: 8px; border: none; background: #4f46e5; color: #fff; cursor: pointer; }
+    #lobby button:hover { background: #6366f1; }
+    #room { display: none; }
+    #toolbar { display: flex; gap: 0.5rem; justify-content: center; padding: 1rem; background: #1a1a1a; }
+    #toolbar button { padding: 0.5rem 1rem; border-radius: 6px; border: 1px solid #444; background: #222; color: #eee; cursor: pointer; }
+    #toolbar button:hover { background: #333; }
+    #video-grid { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: center; padding: 1rem; }
+    #video-grid video { width: 45%; max-width: 480px; aspect-ratio: 16/9; border-radius: 8px; background: #000; object-fit: cover; }
+    @media (max-width: 768px) { #video-grid video { width: 100%; } }
+    #error-msg { display: none; color: #f87171; padding: 1rem; text-align: center; }
+  </style>
+</head>
+<body>
+  <div id="lobby">
+    <h2>WebRTC Mesh Conference</h2>
+    <input id="userId" placeholder="Your name" value="User_" />
+    <input id="roomId" placeholder="Room ID" value="room1" />
+    <button id="joinBtn">Join</button>
+    <div id="error-msg"></div>
+  </div>
+
+  <div id="room">
+    <div id="toolbar">
+      <span id="room-label"></span>
+      <button id="mute-audio">Mute Audio</button>
+      <button id="mute-video">Mute Video</button>
+      <button id="screen-share">Share Screen</button>
+      <button id="leaveBtn">Leave</button>
+    </div>
+    <div id="video-grid"></div>
+  </div>
+
+  <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
+  <script>
+    const SIGNALING_URL = `${location.protocol}//${location.hostname}:${location.port}`;
+
+    const lobby = document.getElementById('lobby');
+    const room = document.getElementById('room');
+    const userIdInput = document.getElementById('userId');
+    const roomIdInput = document.getElementById('roomId');
+    const joinBtn = document.getElementById('joinBtn');
+    const leaveBtn = document.getElementById('leaveBtn');
+    const roomLabel = document.getElementById('room-label');
+    const videoGrid = document.getElementById('video-grid');
+    const errorMsg = document.getElementById('error-msg');
+    const muteAudioBtn = document.getElementById('mute-audio');
+    const muteVideoBtn = document.getElementById('mute-video');
+    const screenShareBtn = document.getElementById('screen-share');
+
+    let socket;
+    let localStream;
+    let roomId;
+    let userId;
+    let peerConnections = {};
+    let isAudioMuted = false;
+    let isVideoMuted = false;
+    let isScreenSharing = false;
+    let screenStream;
+
+    const iceServers = {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+      ],
+    };
+
+    function showError(msg) {
+      errorMsg.textContent = msg;
+      errorMsg.style.display = 'block';
+    }
+
+    function hideError() {
+      errorMsg.style.display = 'none';
+    }
+
+    joinBtn.addEventListener('click', async () => {
+      userId = userIdInput.value.trim() || 'User_' + Math.random().toString(36).slice(2, 6);
+      roomId = roomIdInput.value.trim() || 'room1';
+
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      } catch (err) {
+        showError('Camera/mic access denied. ' + err.message);
+        return;
+      }
+
+      hideError();
+      connectSocket();
+    });
+
+    function connectSocket() {
+      socket = io(SIGNALING_URL);
+
+      socket.on('connect', () => {
+        lobby.style.display = 'none';
+        room.style.display = 'block';
+        roomLabel.textContent = `Room: ${roomId} (you: ${userId})`;
+        addLocalVideo();
+        socket.emit('join-room', { roomId, userId });
+      });
+
+      socket.on('users-in-room', ({ users }) => {
+        users.forEach((user) => createPeerConnection(user.socketId, true));
+      });
+
+      socket.on('user-joined', ({ user }) => {
+        createPeerConnection(user.socketId, true);
+      });
+
+      socket.on('user-left', ({ socketId }) => {
+        removePeerConnection(socketId);
+      });
+
+      socket.on('offer', async ({ from, sdp }) => {
+        if (!peerConnections[from]) createPeerConnection(from, false);
+        const pc = peerConnections[from];
+        await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket.emit('answer', { to: from, sdp: pc.localDescription });
+      });
+
+      socket.on('answer', async ({ from, sdp }) => {
+        const pc = peerConnections[from];
+        if (pc) {
+          await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+        }
+      });
+
+      socket.on('ice-candidate', async ({ from, candidate }) => {
+        const pc = peerConnections[from];
+        if (pc && candidate) {
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(candidate));
+          } catch (e) {
+            console.error('addIceCandidate error', e);
+          }
+        }
+      });
+
+      socket.on('disconnect', () => {
+        leaveRoom();
+      });
+    }
+
+    function addLocalVideo() {
+      const video = document.createElement('video');
+      video.srcObject = localStream;
+      video.autoplay = true;
+      video.playsInline = true;
+      video.muted = true;
+      video.id = 'local-video';
+      videoGrid.prepend(video);
+    }
+
+    function createPeerConnection(targetSocketId, initiator) {
+      if (peerConnections[targetSocketId]) return;
+
+      const pc = new RTCPeerConnection(iceServers);
+      peerConnections[targetSocketId] = pc;
+
+      localStream.getTracks().forEach((track) => {
+        pc.addTrack(track, localStream);
+      });
+
+      const video = document.createElement('video');
+      video.autoplay = true;
+      video.playsInline = true;
+      video.id = 'remote-video-' + targetSocketId;
+      videoGrid.appendChild(video);
+
+      pc.ontrack = (event) => {
+        if (event.streams[0]) {
+          video.srcObject = event.streams[0];
+        }
+      };
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          socket.emit('ice-candidate', { to: targetSocketId, candidate: event.candidate });
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+          removePeerConnection(targetSocketId);
+        }
+      };
+
+      if (initiator) {
+        pc.createOffer()
+          .then((offer) => pc.setLocalDescription(offer))
+          .then(() => {
+            socket.emit('offer', { to: targetSocketId, sdp: pc.localDescription });
+          })
+          .catch((e) => console.error('createOffer error', e));
+      }
+
+      return pc;
+    }
+
+    function removePeerConnection(socketId) {
+      if (peerConnections[socketId]) {
+        peerConnections[socketId].close();
+        delete peerConnections[socketId];
+      }
+      const video = document.getElementById('remote-video-' + socketId);
+      if (video) video.remove();
+    }
+
+    function leaveRoom() {
+      socket?.emit('leave-room', { roomId });
+      Object.keys(peerConnections).forEach(removePeerConnection);
+      if (localStream) localStream.getTracks().forEach((t) => t.stop());
+      if (screenStream) screenStream.getTracks().forEach((t) => t.stop());
+      localStream = null;
+      screenStream = null;
+      isScreenSharing = false;
+      peerConnections = {};
+      room.style.display = 'none';
+      lobby.style.display = 'flex';
+      const localVideo = document.getElementById('local-video');
+      if (localVideo) localVideo.remove();
+      socket?.disconnect();
+    }
+
+    leaveBtn.addEventListener('click', leaveRoom);
+
+    muteAudioBtn.addEventListener('click', () => {
+      isAudioMuted = !isAudioMuted;
+      localStream.getAudioTracks().forEach((t) => (t.enabled = !isAudioMuted));
+      muteAudioBtn.textContent = isAudioMuted ? 'Unmute Audio' : 'Mute Audio';
+    });
+
+    muteVideoBtn.addEventListener('click', () => {
+      isVideoMuted = !isVideoMuted;
+      localStream.getVideoTracks().forEach((t) => (t.enabled = !isVideoMuted));
+      muteVideoBtn.textContent = isVideoMuted ? 'Unmute Video' : 'Mute Video';
+    });
+
+    screenShareBtn.addEventListener('click', async () => {
+      if (isScreenSharing) {
+        stopScreenShare();
+        return;
+      }
+      try {
+        screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        const screenTrack = screenStream.getVideoTracks()[0];
+        screenTrack.onended = () => stopScreenShare();
+
+        Object.values(peerConnections).forEach((pc) => {
+          const sender = pc.getSenders().find((s) => s.track?.kind === 'video');
+          if (sender) sender.replaceTrack(screenTrack);
+        });
+
+        const localVideo = document.getElementById('local-video');
+        if (localVideo) localVideo.srcObject = screenStream;
+
+        isScreenSharing = true;
+        screenShareBtn.textContent = 'Stop Screen';
+      } catch (err) {
+        console.error('Screen share error', err);
+      }
+    });
+
+    function stopScreenShare() {
+      if (!isScreenSharing) return;
+      screenStream?.getTracks().forEach((t) => t.stop());
+      screenStream = null;
+
+      const videoTrack = localStream.getVideoTracks()[0];
+      Object.values(peerConnections).forEach((pc) => {
+        const sender = pc.getSenders().find((s) => s.track?.kind === 'video');
+        if (sender) sender.replaceTrack(videoTrack);
+      });
+
+      const localVideo = document.getElementById('local-video');
+      if (localVideo) localVideo.srcObject = localStream;
+
+      isScreenSharing = false;
+      screenShareBtn.textContent = 'Share Screen';
+    }
+  </script>
+</body>
+</html>
