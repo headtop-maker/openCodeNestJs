@@ -1,0 +1,7 @@
+/node_modules/
+/dist/
+/local-proxy/node_modules/
+.env
+local-proxy/.env
+.DS_Store
+node_modules/

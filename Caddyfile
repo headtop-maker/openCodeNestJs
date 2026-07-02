@@ -1,0 +1,3 @@
+tunnel.example.com {
+    reverse_proxy tunnel:8080
+}

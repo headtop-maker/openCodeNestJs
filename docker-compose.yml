@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  tunnel:
+    build: .
+    restart: always
+    expose:
+      - "8080"
+    environment:
+      - NODE_ENV=production
+    networks:
+      - tunnel-net
+
+  caddy:
+    image: caddy:2-alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - tunnel-net
+
+networks:
+  tunnel-net:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:

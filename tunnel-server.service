@@ -1,0 +1,16 @@
+[Unit]
+Description=WebSocket Tunnel Server
+After=network.target
+
+[Service]
+Type=exec
+User=node
+WorkingDirectory=/opt/tunnel-server
+ExecStart=/usr/bin/node dist/main.js
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+Environment=PORT=8080
+
+[Install]
+WantedBy=multi-user.target
