@@ -33,6 +33,9 @@
 - [04 — Мультиплексирование](04-network-education/04-multiplexing.md)
 - [05 — Паттерны прокси](04-network-education/05-proxy-patterns.md)
 - [06 — Перехват трафика](04-network-education/06-traffic-capture.md)
+- [07 — HTTP CONNECT туннель](04-network-education/07-http-connect-tunnel.md)
+- [08 — TCP проброс через WebSocket](04-network-education/08-tcp-ws-port-forward.md)
+- [09 — Многослойное туннелирование](04-network-education/09-tunnel-chaining.md)
 
 ---
 
